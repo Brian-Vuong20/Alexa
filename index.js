@@ -108,13 +108,14 @@ const PrescriptionIntentHandler = {
         
         //set reminder API
         const reminderApiClient = serviceClientFactory.getReminderManagementServiceClient()
-        const {permissions} = requestEnvelope.context.System.user
+        const permissions = requestEnvelope.context.System.user.permissions
+        const consentToken = requestEnvelope.context.System.user.consentToken
         
         
         //get intent slot
         const medicine = Alexa.getSlotValue(requestEnvelope, "medicine")
         const time = Alexa.getSlotValue(requestEnvelope, "time")
-        const dose = Alexa.getSlotValue(requestEnvelope, 'dose')
+        const dose = Alexa.getSlotValue(requestEnvelope, 'dose') 
         const usage = Alexa.getSlotValue(requestEnvelope, 'usage')
         
         //format the time for the reminder
@@ -122,31 +123,26 @@ const PrescriptionIntentHandler = {
         const reminder_hour = timeSplit[0].toString()
         const reminder_minute = timeSplit[1].toString()
         const currentTime = moment.tz('Australia/Melbourne')
+        
+        
+        
+          const sessionAtrribute = handlerInput.attributesManager.getSessionAttributes()
+          sessionAtrribute.tomorrow_medicine = medicine
+          sessionAtrribute.t_time = time
+          sessionAtrribute.t_dose = dose
+          sessionAtrribute.t_usage = usage
+          handlerInput.attributesManager.setSessionAttributes(sessionAtrribute)
+        
         //ask for user reminder permissions
        
-          if(!permissions) {
+          if(!permissions && !consentToken) {
               return handlerInput.responseBuilder
-              .speak('Please grant permission')
-               .addDirective({
-            		type: "Connections.SendRequest",
-            		name: "AskFor",
-            		payload: {
-            			"@type": "AskForPermissionsConsentRequest",
-            			"@version": "2",
-            			"permissionScopes": [
-            			  {
-            			    "permissionScope": "alexa::alerts:reminders:skill:readwrite",
-            			    
-            			    "consentLevel": "ACCOUNT"
-            			  } 
-            			]
-            		},
-            		token: ""
-            	})
-                 .getResponse();
+              .speak('Please grant permission for reminding system')
+              .withAskForPermissionsConsentCard(['alexa::alerts:reminders:skill:readwrite'])
+              .getResponse();
         }
         
-        
+        else {
         
         //create reminder request for absolute
          
@@ -177,7 +173,7 @@ const PrescriptionIntentHandler = {
                         }
                       }
                       //Getting token for later crud operation for reminders
-                      const reminderToken = await reminderApiClient.getReminders()
+        
                 
         try {
             const setReminder = await reminderApiClient.createReminder(reminderRequest)
@@ -192,26 +188,108 @@ const PrescriptionIntentHandler = {
             })
            
             speakOutput = "I have saved your prescription and set reminder for this prescription"
-            console.log()
+             return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .getResponse();
+            
             
         } catch(err) {
             let errCode = err.response.code
             let errMessage = ''
             
             if(errCode === 'TRIGGER_SCHEDULED_TIME_IN_PAST') {
-                errMessage = "Looks like you can't set a reminder for a time that's already gone by"
+                errMessage = "Looks like you can't set a reminder for a time that's already gone by. I will set it for tomorrow"
             }
-                 console.log("Err" + err)
-            return handlerInput.responseBuilder
+            
+              const setTime = moment.tz('Australia/Melbourne').add(1, 'day')
+                const time_format = setTime.format('YYYY-MM-DDTHH:mm:ss.sss')
+            const scheduledTime = moment.tz('Australia/Melbourne').add(1, 'day').set({hour: reminder_hour, minute: reminder_minute, second: '00.000'})
+        
+        
+             const reminderRequest = 
+                      {
+                       "requestTime" : setTime.format('YYYY-MM-DDTHH:mm:ss.sss'),
+                       "trigger": {
+                            "type" : "SCHEDULED_ABSOLUTE",
+                            "scheduledTime" : scheduledTime.format('YYYY-MM-DDTHH:mm:ss.sss'),
+                            "timeZoneId" : "Australia/Melbourne"
+                       },
+                       "alertInfo": {
+                            "spokenInfo": {
+                                "content": [{
+                                    "locale": "en-US",
+                                    "text": `It is time for you to take ${medicine}`,
+                                    "ssml": `<speak>It is time for you to take ${medicine}</speak>`
+                                }]
+                            }
+                        },
+                        "pushNotification" : {                            
+                             "status" : "ENABLED"
+                        }
+                      }
+                    
+                     
+                
+        try {
+          const setReminder = await reminderApiClient.createReminder(reminderRequest)
+         
+           await DB.collection('Prescriptions').add({
+                reminderId: setReminder.alertToken,
+                medicine: medicine,
+                time: time,
+                dose: dose,
+                usage: `${usage} times a day`
+            })
+           
+        } catch(err) {
+           console.log("Err" + err)
+        }
+         
+   
+           return handlerInput.responseBuilder
             .speak(errMessage)
+            .reprompt(errMessage)
             .getResponse();
            
         }
          
-             return handlerInput.responseBuilder
-            .speak(speakOutput)
-            .getResponse();
             
+    }
+    }
+};
+
+const YesIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.YesIntent';
+    },
+    async handle(handlerInput) {
+        let speakOutput = '';
+        const {requestEnvelope, serviceClientFactory} = handlerInput
+        //set reminder API
+
+         return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .addDelegateDirective({
+                name: "PrescriptionIntent",
+                confirmationStatus: "NONE",
+                slots: {}
+            })
+            .getResponse();
+       
+    }
+};
+const NoIntentHandler = {
+   canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.NoIntent';
+    },
+    handle(handlerInput) {
+        const speakOutput = 'Please let me know if you need me';
+        return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .reprompt(speakOutput)
+            .getResponse();
     }
 };
 
@@ -253,7 +331,7 @@ const UpdatePrescriptionIntentHandler = {
                     
                } else {
                     return handlerInput.responseBuilder
-                            .speak("Sorry. Prescripton does not exist.")
+                            .speak("Sorry. Prescripton does not exist. Would you like to add new prescription")
                             .getResponse();
                             
                }
@@ -274,7 +352,7 @@ const UpdateMedicineIntentHandler = {
     },
      async handle(handlerInput) {
          const {requestEnvelope, serviceClientFactory} = handlerInput
-       let speakOutput = "Update Medicine"
+        let speakOutput = "Update Medicine"
         const reminderApiClient = serviceClientFactory.getReminderManagementServiceClient()
        const sessionAttribute = handlerInput.attributesManager.getSessionAttributes()
        
@@ -404,7 +482,7 @@ const DeletePrescriptionIntentHandler = {
            console.log(err)
        })
       
-        // await reminderApiClient.deleteReminder(deleteId)
+      await reminderApiClient.deleteReminder(deleteId)
        } else {
             return handlerInput.responseBuilder
             .speak("Prescription does not exist")
@@ -465,7 +543,7 @@ const CancelAndStopIntentHandler = {
                 || Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.StopIntent');
     },
     handle(handlerInput) {
-        const speakOutput = 'Goodbye!';
+        const speakOutput = 'Good bye. Please let me know if you need me';
 
         return handlerInput.responseBuilder
             .speak(speakOutput)
@@ -565,6 +643,8 @@ exports.handler = Alexa.SkillBuilders.custom()
         CancelAndStopIntentHandler,
         FallbackIntentHandler,
         PrescriptionIntentHandler,
+        YesIntentHandler,
+        NoIntentHandler,
         UpdatePrescriptionIntentHandler,
         TellStoryIntentHandler,
          UpdateMedicineIntentHandler,
